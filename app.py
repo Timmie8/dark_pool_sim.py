@@ -3,81 +3,81 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Live Dark Pool & Block Trade Monitor", layout="wide")
 
 st.title("🏦 Live Dark Pool & Block Trade Monitor")
-st.caption("Reële Off-Exchange & Block Trade gegevens uit de openbare tape (FINRA TRF / SIP)")
+st.caption("Reële Off-Exchange & Block Trade gegevens (FINRA TRF / SIP)")
 
 # ==========================================
-# API KEY & CONFIGURATIE (IN-APP INVOER)
+# API KEY & CONFIGURATIE
 # ==========================================
 
-# 1. Check eerst of er een sleutel in Streamlit Secrets staat
 default_api_key = st.secrets.get("POLYGON_API_KEY", "")
 
 st.sidebar.header("⚙️ Instellingen & API")
 
-# 2. Invoerveld direct in de app / sidebar
 api_key_input = st.sidebar.text_input(
     "Polygon.io API Key", 
     value=default_api_key, 
     type="password",
-    help="Voer hier je Polygon.io API sleutel in om realtime tape data op te halen."
+    help="Voer hier je Polygon.io API sleutel in."
 )
 
 symbol = st.sidebar.text_input("Ticker Symbol", "AAPL").upper()
 min_block_size = st.sidebar.number_input(
-    "Minimaal Volume per Trade (Block Threshold)", 
+    "Minimaal Volume per Blok/Minuut", 
     min_value=100, 
     value=2000, 
     step=500
 )
 
-# Determineer welke API-key gebruikt wordt
 api_key = api_key_input.strip() if api_key_input else None
 
 # ==========================================
-# FUNCTIONS FOR REAL LIVE DATA
+# FUNCTIONS FOR REAL MARKET DATA
 # ==========================================
 
-def get_live_polygon_trades(symbol, api_key, min_vol):
-    """ Haalt echte individuele trades op via Polygon.io REST API """
-    url = f"https://api.polygon.io/v3/trades/{symbol}?limit=5000&apiKey={api_key}"
+def get_polygon_aggs_data(symbol, api_key, min_vol):
+    """ Haalt intraday minuut-data op via Polygon (Werkt ook op gratis/free tiers) """
+    today = datetime.now().strftime('%Y-%m-%d')
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{today}/{today}?adjusted=true&sort=desc&limit=5000&apiKey={api_key}"
+    
     try:
         response = requests.get(url)
         if response.status_code == 200:
             results = response.json().get('results', [])
-            dark_trades = []
-            for t in results:
-                size = t.get('size', 0)
-                exchange = t.get('exchange')
-                price = t.get('price')
-                timestamp = pd.to_datetime(t.get('sip_timestamp'), unit='ns')
+            if not results:
+                return pd.DataFrame(), "Geen data beschikbaar voor vandaag (markt gesloten of nog geen trades)."
+            
+            blocks = []
+            for bar in results:
+                vol = bar.get('v', 0)
+                price = bar.get('c', 0)
+                timestamp = pd.to_datetime(bar.get('t'), unit='ms')
                 
-                if size >= min_vol:
-                    dark_trades.append({
+                if vol >= min_vol:
+                    blocks.append({
                         "Tijd (UTC)": timestamp.strftime('%H:%M:%S'),
                         "Symbol": symbol,
-                        "Volume": size,
-                        "Prijs": f"${price:.2f}",
-                        "Waarde ($)": f"${(size * price):,.2f}",
-                        "Exchange Code": exchange,
-                        "Type": "OFF-EXCHANGE / DARK BLOCK" if exchange in [4, 15] else "LIT EXCHANGE BLOCK"
+                        "Volume (1m)": vol,
+                        "Sluitprijs": f"${price:.2f}",
+                        "Totale Waarde ($)": f"${(vol * price):,.2f}",
+                        "Indicatie": "Groot Institutioneel Volume Block"
                     })
-            return pd.DataFrame(dark_trades)
+            return pd.DataFrame(blocks), None
+        elif response.status_code == 403:
+            return pd.DataFrame(), "403 Forbidden: Je Polygon API-sleutel heeft geen toegang tot realtime tick data. We vallen terug op Yahoo Finance."
         elif response.status_code == 401:
-            st.error("🔑 Ongeldige Polygon API Key. Controleer je ingevoerde sleutel.")
-            return pd.DataFrame()
+            return pd.DataFrame(), "401 Unauthorized: Ongeldige Polygon API Key."
         else:
-            st.warning(f"Polygon API statuscode: {response.status_code}")
-            return pd.DataFrame()
+            return pd.DataFrame(), f"API Foutcode: {response.status_code}"
     except Exception as e:
-        st.error(f"Fout bij verbinden met Polygon: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), f"Verbindingsfout: {e}"
 
 def get_yfinance_intraday_blocks(symbol, min_vol):
-    """ Fallback: Filtert live 1-minuut marktdata op opvallend hoge volumes """
+    """ Fallback via Yahoo Finance """
     ticker = yf.Ticker(symbol)
     data = ticker.history(period="1d", interval="1m")
     
@@ -96,8 +96,8 @@ def get_yfinance_intraday_blocks(symbol, min_vol):
             "Symbol": symbol,
             "Volume (1m)": vol,
             "Sluitprijs": f"${price:.2f}",
-            "Totale Waarde": f"${(vol * price):,.2f}",
-            "Indicatie": "Echt blokvolume op de markt"
+            "Totale Waarde ($)": f"${(vol * price):,.2f}",
+            "Indicatie": "Reëel Blokvolume op de Markt"
         })
     return pd.DataFrame(result)
 
@@ -105,21 +105,25 @@ def get_yfinance_intraday_blocks(symbol, min_vol):
 # WEERGAVE OP HET DASHBOARD
 # ==========================================
 
-st.subheader(f"Echte Live Trades & Blokken voor **{symbol}**")
+st.subheader(f"Marktdata & Volume Blocks voor **{symbol}**")
+
+use_fallback = True
 
 if api_key:
-    st.success("✅ Polygon API Key actief. Echte Real-time Tape data wordt ingeladen...")
-    df_live = get_live_polygon_trades(symbol, api_key, min_block_size)
-    if not df_live.empty:
-        st.write(f"### Live Block Prints (Volume ≥ {min_block_size})")
-        st.dataframe(df_live, use_container_width=True)
-    else:
-        st.info("Geen grote block trades gevonden met de huidige criteria in de meest recente periode.")
-else:
-    st.warning("⚠️ Geen API Key ingevoerd in het zijpaneel. We tonen nu **reële intraday block-volumes via Yahoo Finance**.")
+    df_poly, err_msg = get_polygon_aggs_data(symbol, api_key, min_block_size)
+    if err_msg is None and not df_poly.empty:
+        st.success("✅ Polygon.io Intraday Data Succesvol Geladen!")
+        st.write(f"### Grote Volumeblokken voor {symbol} (Volume ≥ {min_block_size})")
+        st.dataframe(df_poly, use_container_width=True)
+        use_fallback = False
+    elif err_msg:
+        st.warning(f"⚠️ Polygon melding: {err_msg}")
+
+if use_fallback:
+    st.info("ℹ️ Data wordt ingeladen via **Yahoo Finance Live Intraday Stream**.")
     df_blocks = get_yfinance_intraday_blocks(symbol, min_block_size)
     if not df_blocks.empty:
         st.write(f"### Reële Intraday Pieken & Blokken voor {symbol} (Volume ≥ {min_block_size})")
         st.dataframe(df_blocks, use_container_width=True)
     else:
-        st.write("Geen minuten gevonden met een volume hoger dan de ingestelde drempelwaarde.")
+        st.write("Geen minuten gevonden met een volume hoger dan de ingestelde drempelwaarde. Verlaag eventueel de 'Minimaal Volume' instelling in het menu links.")
