@@ -8,7 +8,7 @@ from datetime import datetime
 st.set_page_config(page_title="Live Dark Pool & Block Trade Monitor", layout="wide")
 
 st.title("🏦 Live Dark Pool & Block Trade Monitor")
-st.caption("Reële Off-Exchange & Block Trade gegevens met Bullish Volume Alerts")
+st.caption("Reële Off-Exchange & Block Trade gegevens met Bullish & Bearish Volume Alerts")
 
 # ==========================================
 # API KEY & CONFIGURATIE
@@ -32,14 +32,14 @@ min_block_size = st.sidebar.number_input(
     step=500
 )
 
-st.sidebar.subheader("🚨 Bullish Volume Alert Drempel")
+st.sidebar.subheader("🚨 Volume Alert Drempels")
 spike_multiplier = st.sidebar.slider(
     "Volume Piek Factor (x Gemiddelde)", 
     min_value=1.5, 
     max_value=10.0, 
     value=3.0, 
     step=0.5,
-    help="Triggert ALLEEN een alert als het volume in een POSITIEVE (groene) minuut X keer hoger is dan gemiddeld."
+    help="Triggert een alert als het volume in 1 minuut X keer hoger is dan gemiddeld."
 )
 
 api_key = api_key_input.strip() if api_key_input else None
@@ -48,13 +48,13 @@ api_key = api_key_input.strip() if api_key_input else None
 # FUNCTIONS FOR REAL MARKET DATA & ALERTS
 # ==========================================
 
-def analyze_bullish_volume_spikes(symbol, min_vol, multiplier):
-    """ Haalt intraday data op en filtert specifiek op Bullish (Positieve) volumepieken """
+def analyze_volume_spikes(symbol, min_vol, multiplier):
+    """ Haalt intraday data op en filtert op zowel Bullish als Bearish volumepieken """
     ticker = yf.Ticker(symbol)
     data = ticker.history(period="1d", interval="1m")
     
     if data.empty:
-        return pd.DataFrame(), 0, []
+        return pd.DataFrame(), 0, [], []
     
     avg_vol_per_min = data['Volume'].mean()
     
@@ -63,36 +63,37 @@ def analyze_bullish_volume_spikes(symbol, min_vol, multiplier):
     blocks = blocks.sort_index(ascending=False)
     
     results = []
-    alerts = []
+    bullish_alerts = []
+    bearish_alerts = []
     
     for idx, row in blocks.iterrows():
         vol = int(row['Volume'])
         close_price = row['Close']
         open_price = row['Open']
         
-        # Bepaal of de minuut positief (groen/koop) of negatief (rood/verkoop) was
+        # Bepaal of de candle positief (groen/koop) of negatief (rood/verkoop) is
         is_positive_candle = close_price >= open_price
         
         ratio = vol / avg_vol_per_min if avg_vol_per_min > 0 else 0
         tijd_str = idx.strftime('%H:%M:%S')
         
-        # Alert triggert ALLEEN als de piek aan de vermenigvuldigingsfactor voldoet EN de candle positief is
-        is_bullish_alert = (ratio >= multiplier) and is_positive_candle
+        is_spike = ratio >= multiplier
         
-        if is_bullish_alert:
-            alerts.append({
-                "Tijd": tijd_str,
-                "Volume": vol,
-                "Factor": f"{ratio:.1f}x gem.",
-                "Prijs": f"${close_price:.2f}",
-                "Waarde": f"${(vol * close_price):,.2f}"
-            })
-            
-        # Label toewijzen voor in de tabel
-        if is_bullish_alert:
+        alert_item = {
+            "Tijd": tijd_str,
+            "Volume": vol,
+            "Factor": f"{ratio:.1f}x gem.",
+            "Prijs": f"${close_price:.2f}",
+            "Waarde": f"${(vol * close_price):,.2f}"
+        }
+        
+        # Alerts verdelen per categorie
+        if is_spike and is_positive_candle:
+            bullish_alerts.append(alert_item)
             status = "🟢 BULLISH SPIKE (KOOP)"
-        elif ratio >= multiplier and not is_positive_candle:
-            status = "🔴 BEARISH SPIKE (VERKOOP - GEEN ALERT)"
+        elif is_spike and not is_positive_candle:
+            bearish_alerts.append(alert_item)
+            status = "🔴 BEARISH SPIKE (VERKOOP)"
         else:
             status = "🟢 Positief Blok" if is_positive_candle else "🔴 Negatief Blok"
             
@@ -107,27 +108,39 @@ def analyze_bullish_volume_spikes(symbol, min_vol, multiplier):
             "Status": status
         })
         
-    return pd.DataFrame(results), avg_vol_per_min, alerts
+    return pd.DataFrame(results), avg_vol_per_min, bullish_alerts, bearish_alerts
 
 # ==========================================
 # WEERGAVE OP HET DASHBOARD
 # ==========================================
 
-st.subheader(f"Marktdata & Bullish Volume Alerts voor **{symbol}**")
+st.subheader(f"Marktdata & Volume Alerts voor **{symbol}**")
 
-df_blocks, avg_vol, alerts = analyze_bullish_volume_spikes(symbol, min_block_size, spike_multiplier)
+df_blocks, avg_vol, bull_alerts, bear_alerts = analyze_volume_spikes(symbol, min_block_size, spike_multiplier)
 
 if avg_vol > 0:
     st.info(f"📊 Gemiddeld volume per minuut vandaag voor **{symbol}**: **{int(avg_vol):,}** aandelen.")
 
-# WEERGEVEN VAN EXCLUSIEVE BULLISH ALERTS
-if alerts:
-    st.success(f"🟢 **BULLISH VOLUME ALERT DETECTIE ({len(alerts)} Koop-Volumepieken gevonden!)**")
-    for a in alerts[:5]: # Toon de bovenste 5 meest recente bullish pieken
-        st.write(f"- **{a['Tijd']}**: Positieve volumepiek van **{a['Volume']:,}** aandelen ({a['Factor']}) op **{a['Prijs']}** (Totale waarde: **{a['Waarde']}**)")
-    st.markdown("---")
-else:
-    st.write("ℹ️ *Geen positieve (bullish) volumepieken gevonden die aan de drempelwaarde voldoen.*")
+# WEERGEVEN VAN ALERTS IN COLUMNS
+col_bull, col_bear = st.columns(2)
+
+with col_bull:
+    if bull_alerts:
+        st.success(f"🟢 **BULLISH KOOP ALERTS ({len(bull_alerts)})**")
+        for a in bull_alerts[:3]:
+            st.write(f"- **{a['Tijd']}**: Piek van **{a['Volume']:,}** aandelen ({a['Factor']}) op **{a['Prijs']}** (Waarde: **{a['Waarde']}**)")
+    else:
+        st.write("ℹ️ *Geen Bullish pieken gevonden.*")
+
+with col_bear:
+    if bear_alerts:
+        st.error(f"🔴 **BEARISH VERKOOP ALERTS ({len(bear_alerts)})**")
+        for a in bear_alerts[:3]:
+            st.write(f"- **{a['Tijd']}**: Piek van **{a['Volume']:,}** aandelen ({a['Factor']}) op **{a['Prijs']}** (Waarde: **{a['Waarde']}**)")
+    else:
+        st.write("ℹ️ *Geen Bearish pieken gevonden.*")
+
+st.markdown("---")
 
 # DATA TABEL
 if not df_blocks.empty:
